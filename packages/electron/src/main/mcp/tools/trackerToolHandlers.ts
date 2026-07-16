@@ -1679,9 +1679,16 @@ export async function handleTrackerCreate(
     const statusField = rf('workflowStatus', 'status');
     const priorityField = rf('priority', 'priority');
 
+    // Default the initial status from the schema, not a hardcoded "to-do".
+    // Full-document types (plan → 'draft', idea → 'new') don't allow "to-do", so
+    // a literal default made their create fail validation and silently no-op.
+    const statusFieldDef = model?.fields?.find((f) => f.name === statusField);
+    const defaultStatus =
+      (typeof statusFieldDef?.default === 'string' && statusFieldDef.default) || 'to-do';
+
     const data: Record<string, any> = {
       [titleField]: args.title,
-      [statusField]: args.status || "to-do",
+      [statusField]: args.status || defaultStatus,
       [priorityField]: args.priority || "medium",
       created: new Date().toISOString().split("T")[0],
       authorIdentity,
@@ -1710,6 +1717,17 @@ export async function handleTrackerCreate(
         if (value !== undefined) {
           data[key] = value;
         }
+      }
+    }
+
+    // Auto-populate required self-identifier fields (e.g. plan.planId,
+    // decision.decisionId) that the schema marks required but no MCP caller ever
+    // supplies. These are non-inline string fields; seed them with the item id so
+    // they're stable and unique. Without this, full-document types fail schema
+    // validation and create silently returns no item.
+    for (const f of model?.fields ?? []) {
+      if (f.required && f.type === 'string' && f.displayInline === false && data[f.name] === undefined) {
+        data[f.name] = id;
       }
     }
 
