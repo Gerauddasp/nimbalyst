@@ -23,7 +23,13 @@ import {
 } from './tracker/trackerRelationshipIndexStore';
 import { propagateInverseRelationships } from './tracker/inverseRelationshipWrites';
 import { applyRelationshipFieldWrites } from './tracker/relationshipFieldWrite';
-import { nestRelationshipFieldsIntoCustomFields } from './tracker/relationshipFieldStorage';
+import { nestRelationshipFieldsIntoCustomFields, readStoredFieldValue } from './tracker/relationshipFieldStorage';
+import {
+  recomputePlanProgress,
+  affectedPlanIdsForUpdate,
+  type PlanRollupDeps,
+} from './tracker/planProgressRollup';
+import { normalizeRelationshipValue } from '@nimbalyst/runtime/plugins/TrackerPlugin/models';
 import { projectionWouldChange } from './tracker/projectionUpdateGuard';
 import { extractFrontmatter, extractCommonFields } from '../utils/frontmatterReader';
 import { VIRTUAL_DOCS, isVirtualPath } from '@nimbalyst/runtime';
@@ -37,7 +43,7 @@ import {
   buildFullDocumentTrackerId,
   parseFullDocumentTrackerId,
 } from '@nimbalyst/runtime/plugins/TrackerPlugin/documentHeader/frontmatterUtils';
-import { globalRegistry } from '@nimbalyst/runtime/plugins/TrackerPlugin/models/TrackerDataModel';
+import { globalRegistry, getRoleField } from '@nimbalyst/runtime/plugins/TrackerPlugin/models/TrackerDataModel';
 import { database } from '../database/PGLiteDatabaseWorker';
 import { shouldExcludeDir } from '../utils/fileFilters';
 import { getRegisteredExtensions } from '../extensions/RegisteredFileTypes';
@@ -1941,6 +1947,67 @@ export class ElectronDocumentService implements DocumentService {
   }
 
   /**
+   * Recompute the `progress` of every Plan affected by an update to one item,
+   * deriving it from the completion of that plan's linked child tasks.
+   *
+   * Shared by both write paths — the MCP `tracker_update` handler and the IPC
+   * update handler — so a task ticked in the app rolls up exactly like one
+   * ticked via the CLI, and the two can't drift. Call AFTER inverse propagation
+   * so `plan.childTasks` is already current. Best-effort: a roll-up failure must
+   * never fail the originating update.
+   */
+  async recomputePlanProgressForUpdate(
+    source: { id: string; type: string },
+    oldData: Record<string, unknown>,
+    changedFields: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    const parse = (d: unknown): Record<string, unknown> =>
+      typeof d === 'string' ? JSON.parse(d) : ((d as Record<string, unknown>) ?? {});
+
+    const current = await database.query<any>(`SELECT data FROM tracker_items WHERE id = $1`, [source.id]);
+    const planIds = affectedPlanIdsForUpdate({
+      sourceType: source.type,
+      sourceId: source.id,
+      oldData,
+      newData: parse(current.rows[0]?.data),
+      childTasksChanged: !!changedFields && 'childTasks' in changedFields,
+    });
+    if (planIds.length === 0) return;
+
+    const deps: PlanRollupDeps = {
+      loadChildTaskIds: async (planId) => {
+        const r = await database.query<any>(`SELECT data FROM tracker_items WHERE id = $1`, [planId]);
+        if (!r.rows[0]) return null;
+        return normalizeRelationshipValue(readStoredFieldValue(parse(r.rows[0].data), 'childTasks')).map((v) => v.itemId);
+      },
+      loadTaskStatus: async (taskId) => {
+        const r = await database.query<any>(`SELECT type, data FROM tracker_items WHERE id = $1`, [taskId]);
+        if (!r.rows[0]) return undefined;
+        const td = parse(r.rows[0].data);
+        const model = globalRegistry.get(r.rows[0].type);
+        const sf = (model ? getRoleField(model, 'workflowStatus') : undefined) ?? 'status';
+        return typeof td[sf] === 'string' ? (td[sf] as string) : undefined;
+      },
+      loadPlanProgress: async (planId) => {
+        const r = await database.query<any>(`SELECT data FROM tracker_items WHERE id = $1`, [planId]);
+        const pd = parse(r.rows[0]?.data);
+        return typeof pd.progress === 'number' ? (pd.progress as number) : undefined;
+      },
+      writePlanProgress: async (planId, progress) => {
+        await this.updateTrackerItem(planId, { progress });
+      },
+    };
+
+    for (const planId of planIds) {
+      try {
+        await recomputePlanProgress(planId, deps);
+      } catch (rollupErr) {
+        console.error('[DocumentService] plan progress roll-up failed:', rollupErr);
+      }
+    }
+  }
+
+  /**
    * Flip a tracker item's team-share flag from the UI — the per-item "Share
    * with team" toggle for `hybrid` trackers (e.g. plans). Writes the canonical
    * `share` flag into the item's data and reconciles the team TrackerRoom:
@@ -3803,6 +3870,14 @@ export function setupDocumentServiceHandlers(resolver: DocumentServiceResolver) 
         );
       } catch (invErr) {
         console.error('[DocumentService] inverse relationship propagation failed:', invErr);
+      }
+
+      // Roll a Plan's progress up from its child tasks, so ticking a task done in
+      // the app behaves exactly like doing it via the CLI (same shared helper).
+      try {
+        await svc.recomputePlanProgressForUpdate({ id: item.id, type: item.type }, oldData, updates);
+      } catch (rollupErr) {
+        console.error('[DocumentService] plan progress roll-up failed:', rollupErr);
       }
 
       return { success: true, item };

@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 <!-- New features go here -->
-- Tasks can be linked to a plan.
+- Tasks can be linked to a plan, and the plan's progress follows their completion.
 
 ### Changed
 <!-- Changes to existing functionality go here -->

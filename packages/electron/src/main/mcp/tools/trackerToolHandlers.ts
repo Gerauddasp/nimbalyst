@@ -2548,6 +2548,22 @@ export async function handleTrackerUpdate(
         }
       }
 
+      // Plan progress roll-up: recompute the progress of any Plan affected by
+      // this update from its child tasks' completion. Delegates to the shared
+      // service helper the IPC update handler also uses, so CLI and in-app edits
+      // can't drift. Runs after inverse propagation so childTasks is current.
+      if (docService) {
+        try {
+          await docService.recomputePlanProgressForUpdate(
+            { id: row.id, type: row.type },
+            oldDataSnapshot,
+            relChangedFields,
+          );
+        } catch (rollupErr) {
+          console.error('[MCP Server] plan progress roll-up failed:', rollupErr);
+        }
+      }
+
       const postSyncRow = await resolveTrackerRowByReference(db, row.id, workspacePath);
 
       const updateSummaryParts: string[] = [];
