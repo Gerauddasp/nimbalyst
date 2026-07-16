@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 <!-- Bug fixes go here -->
+- Creating a plan, idea or decision from an AI session now works instead of silently doing nothing.
 
 ### Removed
 <!-- Removed features go here -->
