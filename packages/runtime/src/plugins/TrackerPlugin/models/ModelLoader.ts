@@ -68,6 +68,19 @@ const builtinTrackers: TrackerDataModel[] = [
       { name: 'updated', type: 'datetime', displayInline: false, readOnly: true },
       { name: 'startDate', type: 'date', displayInline: false },
       { name: 'agentSessions', type: 'array', itemType: 'object', displayInline: false },
+      // Child tasks under this Plan. Inverse of task.parentPlan; the inverse write
+      // path keeps both sides in sync. Enables a Plan-level task roll-up later.
+      {
+        name: 'childTasks',
+        type: 'relationship',
+        relationshipTypeKey: 'parent-of',
+        inverseRelationshipTypeKey: 'child-of',
+        inverseFieldId: 'parentPlan',
+        targetTrackerTypes: ['task'],
+        multiValue: true,
+        childRelationship: true,
+        displayInline: false,
+      },
     ],
     statusBarLayout: [
       {
@@ -237,6 +250,19 @@ const builtinTrackers: TrackerDataModel[] = [
       { name: 'owner', type: 'user' },
       { name: 'description', type: 'text' },
       { name: 'tags', type: 'array', itemType: 'string', displayInline: false },
+      // Link a task up to its umbrella Plan. Inverse propagates to plan.childTasks
+      // on update (see inverseRelationshipWrites). Set via `--field parentPlan=<planId>`.
+      {
+        name: 'parentPlan',
+        type: 'relationship',
+        relationshipTypeKey: 'child-of',
+        inverseRelationshipTypeKey: 'parent-of',
+        inverseFieldId: 'childTasks',
+        targetTrackerTypes: ['plan'],
+        multiValue: false,
+        childRelationship: true,
+        displayInline: false,
+      },
     ],
     inlineTemplate: '{icon} {title} {status} {owner}',
     roles: {
