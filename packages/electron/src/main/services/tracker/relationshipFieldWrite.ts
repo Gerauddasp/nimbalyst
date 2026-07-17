@@ -21,6 +21,36 @@ export type RelationshipWriteResult =
   | { ok: false; field: string; errors: string[] };
 
 /**
+ * Collects the relationship target ids present in `data` for `fieldDefs` and
+ * resolves each one's tracker type in a single async pass via `lookupType`
+ * (typically a DB row lookup), returning a synchronous `targetTypeOf` resolver
+ * for `applyRelationshipFieldWrites`. Without this, `validateRelationshipValue`
+ * has no way to learn a target's type and silently skips the target-type check.
+ */
+export async function resolveRelationshipTargetTypes(
+  data: Record<string, unknown>,
+  fieldDefs: FieldDefinition[],
+  lookupType: (itemId: string) => Promise<string | undefined>,
+): Promise<(itemId: string) => string | undefined> {
+  const ids = new Set<string>();
+  for (const def of fieldDefs) {
+    if (!isRelationshipField(def)) continue;
+    if (!(def.name in data)) continue;
+    for (const v of normalizeRelationshipValue(data[def.name])) {
+      if (v.itemId) ids.add(v.itemId);
+    }
+  }
+  const types = new Map<string, string>();
+  await Promise.all(
+    [...ids].map(async (id) => {
+      const type = await lookupType(id);
+      if (type) types.set(id, type);
+    }),
+  );
+  return (itemId) => types.get(itemId);
+}
+
+/**
  * Canonicalize + validate every relationship field present in `data` against the
  * schema's field definitions. On the first invalid field, returns its errors and
  * leaves `data` unmodified for that field. `targetTypeOf` optionally resolves a

@@ -18,7 +18,7 @@ import {
 } from '../../services/TrackerPolicyService';
 import { isTrackerSyncActive, syncTrackerItem } from '../../services/TrackerSyncManager';
 import { applyHeadlessBodyMarkdown } from '../../services/MainBodyDocService';
-import { applyRelationshipFieldWrites } from '../../services/tracker/relationshipFieldWrite';
+import { applyRelationshipFieldWrites, resolveRelationshipTargetTypes } from '../../services/tracker/relationshipFieldWrite';
 import { extractItemCustomFields } from '../../services/tracker/trackerRowCustomFields';
 import { nestRelationshipFieldsIntoCustomFields, readStoredFieldValue } from '../../services/tracker/relationshipFieldStorage';
 import { isRelationshipField } from '@nimbalyst/runtime/plugins/TrackerPlugin/models';
@@ -1714,7 +1714,13 @@ export async function handleTrackerCreate(
     }
 
     // Canonicalize + validate relationship fields (Epic C) before persistence.
-    const relWrite = applyRelationshipFieldWrites(data, globalRegistry.get(args.type)?.fields ?? [], id);
+    const createRelDefs = globalRegistry.get(args.type)?.fields ?? [];
+    const createTargetTypeOf = await resolveRelationshipTargetTypes(
+      data,
+      createRelDefs,
+      async (itemId) => (await resolveTrackerRowByReference(db, itemId, workspacePath))?.type,
+    );
+    const relWrite = applyRelationshipFieldWrites(data, createRelDefs, id, createTargetTypeOf);
     if (!relWrite.ok) {
       return {
         content: [{ type: 'text', text: `Invalid relationship field "${relWrite.field}": ${relWrite.errors.join('; ')}` }],
@@ -2350,7 +2356,13 @@ export async function handleTrackerUpdate(
       }
 
       // Canonicalize + validate relationship fields (Epic C) before persistence.
-      const relWrite = applyRelationshipFieldWrites(data, globalRegistry.get(row.type)?.fields ?? [], row.id);
+      const updateRelDefs = globalRegistry.get(row.type)?.fields ?? [];
+      const updateTargetTypeOf = await resolveRelationshipTargetTypes(
+        data,
+        updateRelDefs,
+        async (itemId) => (await resolveTrackerRowByReference(db, itemId, workspacePath))?.type,
+      );
+      const relWrite = applyRelationshipFieldWrites(data, updateRelDefs, row.id, updateTargetTypeOf);
       if (!relWrite.ok) {
         return {
           content: [{ type: 'text', text: `Invalid relationship field "${relWrite.field}": ${relWrite.errors.join('; ')}` }],

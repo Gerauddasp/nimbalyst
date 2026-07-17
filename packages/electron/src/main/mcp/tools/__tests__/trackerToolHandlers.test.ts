@@ -566,6 +566,23 @@ describe('handleTrackerCreate session linking', () => {
     expect(payload.structured.action).toBe('validationFailed');
     expect(payload.structured.tool).toBe('tracker_create');
   });
+
+  it('rejects a relationship target whose type is not allowed', async () => {
+    // parentPlan targets [plan]; point it at a task instead.
+    mockGlobalRegistry.get.mockReturnValue({
+      fields: [{ name: 'parentPlan', type: 'relationship', targetTrackerTypes: ['plan'] }],
+    });
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'task_1', type: 'task' }] }); // resolveTrackerRowByReference(target)
+
+    const result = await handleTrackerCreate(
+      { type: 'todo', title: 'x', fields: { parentPlan: 'task_1' } },
+      '/tmp/ws',
+      undefined,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toMatch(/not one of|target-type/);
+  });
 });
 
 describe('handleTrackerLinkSession', () => {

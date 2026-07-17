@@ -22,7 +22,7 @@ import {
   rebuildWorkspaceRelationshipIndex,
 } from './tracker/trackerRelationshipIndexStore';
 import { propagateInverseRelationships } from './tracker/inverseRelationshipWrites';
-import { applyRelationshipFieldWrites } from './tracker/relationshipFieldWrite';
+import { applyRelationshipFieldWrites, resolveRelationshipTargetTypes } from './tracker/relationshipFieldWrite';
 import { nestRelationshipFieldsIntoCustomFields } from './tracker/relationshipFieldStorage';
 import { projectionWouldChange } from './tracker/projectionUpdateGuard';
 import { extractFrontmatter, extractCommonFields } from '../utils/frontmatterReader';
@@ -3760,11 +3760,15 @@ export function setupDocumentServiceHandlers(resolver: DocumentServiceResolver) 
 
       const updates = { ...payload.updates };
       if (oldType) {
-        const relWrite = applyRelationshipFieldWrites(
-          updates,
-          globalRegistry.get(oldType)?.fields ?? [],
-          payload.itemId,
-        );
+        const relDefs = globalRegistry.get(oldType)?.fields ?? [];
+        const targetTypeOf = await resolveRelationshipTargetTypes(updates, relDefs, async (itemId) => {
+          const targetRow = await database.query<any>(
+            `SELECT type FROM tracker_items WHERE id = $1 OR issue_key = $1 ORDER BY updated DESC LIMIT 1`,
+            [itemId],
+          );
+          return targetRow.rows[0]?.type;
+        });
+        const relWrite = applyRelationshipFieldWrites(updates, relDefs, payload.itemId, targetTypeOf);
         if (!relWrite.ok) {
           throw new Error(`Invalid relationship field "${relWrite.field}": ${relWrite.errors.join('; ')}`);
         }
