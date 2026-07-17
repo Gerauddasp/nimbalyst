@@ -10,7 +10,7 @@
  * Auth is a bearer token from the endpoint descriptor; the server binds to
  * 127.0.0.1 only.
  */
-import { connectionError } from '../cli/exitCodes.js';
+import { CliError, ExitCode, connectionError, type ExitCodeValue } from '../cli/exitCodes.js';
 
 interface JsonRpcResponse {
   jsonrpc: '2.0';
@@ -24,6 +24,14 @@ export interface McpToolResult {
   summary?: string;
   isError?: boolean;
   raw: any;
+}
+
+export interface CallToolOptions {
+  /** Return an error result instead of throwing, for callers that interpret it
+   *  themselves (e.g. tracker_get treats "not found" as `null`, exit 1). */
+  tolerateError?: boolean;
+  /** Exit code for the thrown CliError (default: CONNECTION). */
+  errorCode?: ExitCodeValue;
 }
 
 export class McpHttpClient {
@@ -110,7 +118,12 @@ export class McpHttpClient {
     this.initialized = true;
   }
 
-  async callTool(workspacePath: string, name: string, args: Record<string, unknown>): Promise<McpToolResult> {
+  async callTool(
+    workspacePath: string,
+    name: string,
+    args: Record<string, unknown>,
+    opts?: CallToolOptions,
+  ): Promise<McpToolResult> {
     await this.ensureInitialized(workspacePath);
     const { res, text } = await this.post({
       jsonrpc: '2.0',
@@ -122,7 +135,16 @@ export class McpHttpClient {
     if (rpc.error) {
       throw connectionError(`MCP tool ${name} failed: ${rpc.error.message}`);
     }
-    return normalizeToolResult(rpc.result);
+    const result = normalizeToolResult(rpc.result);
+    // A tool-level error result must fail loudly by default; silently returning
+    // it let write commands report success for writes the app rejected.
+    if (result.isError && !opts?.tolerateError) {
+      throw new CliError(
+        opts?.errorCode ?? ExitCode.CONNECTION,
+        `${name} failed: ${result.summary ?? 'the app rejected the call'}`,
+      );
+    }
+    return result;
   }
 }
 

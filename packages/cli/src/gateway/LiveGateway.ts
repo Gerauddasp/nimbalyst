@@ -9,7 +9,7 @@
 import { McpHttpClient } from './mcpClient.js';
 import type { EndpointDescriptor } from './endpoint.js';
 import type { TrackerRecord } from '../vendor/trackerRecord.js';
-import { connectionError } from '../cli/exitCodes.js';
+import { ExitCode, connectionError } from '../cli/exitCodes.js';
 import type {
   CreateInput,
   GatewayStatus,
@@ -77,13 +77,14 @@ export class LiveGateway implements TrackerGateway {
   }
 
   async getTracker(workspace: string, reference: string): Promise<TrackerRecord | null> {
-    const result = await this.client.callTool(workspace, 'tracker_get', { id: reference });
+    // tolerateError: "not found" comes back as an error result and maps to null.
+    const result = await this.client.callTool(workspace, 'tracker_get', { id: reference }, { tolerateError: true });
     const item = result.structured?.item;
     return item ? mcpItemToRecord(item) : null;
   }
 
   async getTrackerByUrn(workspace: string, urn: string): Promise<TrackerRecord | null> {
-    const result = await this.client.callTool(workspace, 'tracker_get_by_urn', { urn });
+    const result = await this.client.callTool(workspace, 'tracker_get_by_urn', { urn }, { tolerateError: true });
     if (result.structured?.found === false) return null;
     const item = result.structured?.item ?? result.structured;
     return item && item.id ? mcpItemToRecord(item) : null;
@@ -91,7 +92,7 @@ export class LiveGateway implements TrackerGateway {
 
   async getTrackerBody(workspace: string, record: TrackerRecord): Promise<string | undefined> {
     // tracker_get returns the markdown body in its summary / structured payload.
-    const result = await this.client.callTool(workspace, 'tracker_get', { id: record.issueKey ?? record.id });
+    const result = await this.client.callTool(workspace, 'tracker_get', { id: record.issueKey ?? record.id }, { tolerateError: true });
     const body = result.structured?.body ?? result.structured?.item?.body;
     if (typeof body === 'string') return body;
     return result.summary;
@@ -125,9 +126,16 @@ export class LiveGateway implements TrackerGateway {
     if (input.fields && Object.keys(input.fields).length) args.fields = input.fields;
     if (input.linkSession) args.linkSession = true;
 
-    const result = await this.client.callTool(workspace, 'tracker_create', args);
+    // A rejected create (e.g. schema validation) now throws from callTool with
+    // WRITE_NOT_PERMITTED instead of fabricating a fake "(created)" success.
+    const result = await this.client.callTool(workspace, 'tracker_create', args, {
+      errorCode: ExitCode.WRITE_NOT_PERMITTED,
+    });
     const item = result.structured?.item;
-    return item ? mcpItemToRecord(item) : emptyRecordFromInput(workspace, input);
+    if (!item) {
+      throw connectionError(`Create of ${input.type} returned no item (nothing persisted).`);
+    }
+    return mcpItemToRecord(item);
   }
 
   async updateTracker(workspace: string, reference: string, input: UpdateInput): Promise<TrackerRecord> {
@@ -148,7 +156,11 @@ export class LiveGateway implements TrackerGateway {
     if (input.fields && Object.keys(input.fields).length) args.fields = input.fields;
     if (input.unsetFields?.length) args.unsetFields = input.unsetFields;
 
-    const result = await this.client.callTool(workspace, 'tracker_update', args);
+    // A rejected update throws from callTool; previously the error result had no
+    // item, so the re-fetch below reported the *unchanged* record as "Updated".
+    const result = await this.client.callTool(workspace, 'tracker_update', args, {
+      errorCode: ExitCode.WRITE_NOT_PERMITTED,
+    });
     const item = result.structured?.item;
     if (!item) {
       const fetched = await this.getTracker(workspace, reference);
@@ -175,20 +187,17 @@ export class LiveGateway implements TrackerGateway {
   async defineType(workspace: string, schema: Record<string, unknown>, fileName?: string): Promise<void> {
     const args: Record<string, unknown> = { schema };
     if (fileName) args.fileName = fileName;
-    const result = await this.client.callTool(workspace, 'tracker_define_type', args);
-    if (result.isError) throw connectionError(result.summary ?? 'Failed to define tracker type.');
+    await this.client.callTool(workspace, 'tracker_define_type', args);
   }
 
   async deleteType(workspace: string, type: string): Promise<void> {
-    const result = await this.client.callTool(workspace, 'tracker_delete_type', { type });
-    if (result.isError) throw connectionError(result.summary ?? 'Failed to delete tracker type.');
+    await this.client.callTool(workspace, 'tracker_delete_type', { type });
   }
 
   // ---- importers -----------------------------------------------------------
 
   async importerList(workspace: string): Promise<ImporterInfo[]> {
     const result = await this.client.callTool(workspace, 'tracker_importer_list', {});
-    if (result.isError) throw connectionError(result.summary ?? 'Failed to list importers.');
     const importers: any[] = result.structured?.importers ?? [];
     return importers.map((i) => ({
       id: i.id,
@@ -206,7 +215,6 @@ export class LiveGateway implements TrackerGateway {
     if (opts.state) args.state = opts.state;
     if (opts.limit !== undefined) args.limit = opts.limit;
     const result = await this.client.callTool(workspace, 'tracker_importer_search', args);
-    if (result.isError) throw connectionError(result.summary ?? 'Importer search failed.');
     const s = result.structured ?? {};
     return { binding: s.binding, items: Array.isArray(s.items) ? s.items : [], nextCursor: s.nextCursor };
   }
@@ -215,14 +223,12 @@ export class LiveGateway implements TrackerGateway {
     const args: Record<string, unknown> = { providerId: opts.providerId, externalId: opts.externalId };
     if (opts.primaryType) args.primaryType = opts.primaryType;
     const result = await this.client.callTool(workspace, 'tracker_import', args);
-    if (result.isError) throw connectionError(result.summary ?? 'Import failed.');
     const s = result.structured ?? {};
     return { id: s.id, urn: s.urn, created: s.created ?? false, summary: s.summary ?? result.summary };
   }
 
   async resnapshot(workspace: string, urn: string): Promise<ResnapshotResult> {
     const result = await this.client.callTool(workspace, 'tracker_resnapshot', { urn });
-    if (result.isError) throw connectionError(result.summary ?? 'Re-snapshot failed.');
     const s = result.structured ?? {};
     return {
       id: s.id,
@@ -237,20 +243,6 @@ export class LiveGateway implements TrackerGateway {
   close(): void {
     /* stateless HTTP; nothing to close */
   }
-}
-
-/** Fallback record if the create tool omitted the item (still report success). */
-function emptyRecordFromInput(workspace: string, input: CreateInput): TrackerRecord {
-  return {
-    id: '(created)',
-    primaryType: input.type,
-    typeTags: [input.type, ...(input.typeTags ?? [])],
-    source: 'native',
-    archived: false,
-    syncStatus: 'local',
-    system: { workspace, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
-    fields: { title: input.title, status: input.status, priority: input.priority },
-  };
 }
 
 function applyClientSideFilters(records: TrackerRecord[], filters: ListFilters): TrackerRecord[] {
